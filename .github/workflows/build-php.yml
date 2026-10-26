@@ -1,0 +1,74 @@
+name: build-php
+run-name: build-php ${{ inputs.php_version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_version:
+        description: PHP version (8.2.x, 8.3.x, 8.4.x or 8.5.x)
+        required: true
+        type: string
+      sha256:
+        description: SHA256 of php-<version>.tar.xz
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: build-php-${{ inputs.php_version }}
+  cancel-in-progress: false
+
+env:
+  PHP_VERSION: ${{ inputs.php_version }}
+  PHP_SHA256: ${{ inputs.sha256 }}
+  BUILDX_BAKE_FILE: docker-bake.php.hcl
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: targets
+        run: echo "targets=$(docker buildx bake --print | jq -c '.target | keys')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: docker buildx bake --load --progress=plain "$TARGET"
+      - run: |
+          definition="$(docker buildx bake --print "$TARGET")"
+          ./test/smoke-php.sh \
+            "$(jq -r '.target[].tags[0]' <<< "$definition")" \
+            "$PHP_VERSION" \
+            "$(jq -r '.target[].context | split("/") | last' <<< "$definition")"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker buildx bake --push "$TARGET"
